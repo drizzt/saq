@@ -186,6 +186,58 @@ class TestQueue(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.count("incomplete"), 1)
         self.assertEqual(await self.count("active"), 0)
 
+    async def test_requeue(self) -> None:
+        job = await self.enqueue("test")
+        await self.dequeue()
+        self.assertEqual(await self.count("queued"), 0)
+        self.assertEqual(await self.count("incomplete"), 1)
+        self.assertEqual(await self.count("active"), 1)
+        self.assertEqual(self.queue.requeued, 0)
+        await self.queue.requeue(job)
+        self.assertEqual(self.queue.requeued, 1)
+        self.assertEqual(await self.count("queued"), 1)
+        self.assertEqual(await self.count("incomplete"), 1)
+        self.assertEqual(await self.count("active"), 0)
+        self.assertEqual(job.status, Status.QUEUED)
+        self.assertEqual(job.attempts, 0)
+
+    async def test_requeue_resets_attempts(self) -> None:
+        job = await self.enqueue("test", retries=3)
+        await self.dequeue()
+        job.attempts = 2
+        job.started = 42
+        job.completed = 43
+        job.progress = 0.5
+        job.error = "boom"
+        job.result = "old"
+        await self.queue.requeue(job)
+        self.assertEqual(job.attempts, 0)
+        self.assertEqual(job.started, 0)
+        self.assertEqual(job.completed, 0)
+        self.assertEqual(job.progress, 0)
+        self.assertIsNone(job.error)
+        self.assertIsNone(job.result)
+
+    async def test_requeue_preserves_key(self) -> None:
+        job = await self.enqueue("test", key="same-key", a=1)
+        original_id = job.id
+        await self.dequeue()
+        job.kwargs = {"a": 2}
+        await self.queue.requeue(job)
+        refreshed = await self.queue.job(job.key)
+        assert refreshed is not None
+        self.assertEqual(refreshed.id, original_id)
+        self.assertEqual(refreshed.kwargs, {"a": 2})
+
+    async def test_requeue_scheduled(self) -> None:
+        job = await self.enqueue("test")
+        await self.dequeue()
+        job.scheduled = int(time.time() + 60)
+        await self.queue.requeue(job)
+        self.assertEqual(await self.count("queued"), 0)
+        self.assertEqual(await self.count("incomplete"), 1)
+        self.assertEqual(await self.count("active"), 0)
+
     async def test_retry_delay(self) -> None:
         # Let's first verify how things work without a retry delay
         worker = Worker(self.queue, functions=functions, dequeue_timeout=0.1)

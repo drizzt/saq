@@ -16,6 +16,7 @@ from saq.errors import InvalidUrlError
 from saq.job import (
     TERMINAL_STATUSES,
     UNSUCCESSFUL_TERMINAL_STATUSES,
+    _REQUEUE_MARKER,
     Job,
     Status,
     get_default_job_key,
@@ -74,6 +75,7 @@ class Queue(ABC):
         self.failed = 0
         self.retried = 0
         self.aborted = 0
+        self.requeued = 0
         self._dump = dump or json.dumps
         self._load = load or json.loads
         self._swept_error_message = swept_error_message or DEFAULT_SWEPT_JOB_ERROR
@@ -176,6 +178,10 @@ class Queue(ABC):
         pass
 
     @abstractmethod
+    async def _requeue(self, job: Job) -> None:
+        pass
+
+    @abstractmethod
     async def _finish(
         self,
         job: Job,
@@ -252,6 +258,7 @@ class Queue(ABC):
             "failed": self.failed,
             "retried": self.retried,
             "aborted": self.aborted,
+            "requeued": self.requeued,
             "uptime": now() - self.started,
         }
         info: WorkerInfo = {
@@ -283,6 +290,28 @@ class Queue(ABC):
         await self._retry(job=job, error=error)
         self.retried += 1
         logger.info("Retrying %s", job.info(logger.isEnabledFor(logging.DEBUG)))
+
+    async def requeue(self, job: Job) -> None:
+        """Re-queue *job* under its existing key as a fresh attempt.
+
+        Resets per-attempt bookkeeping, drops the handler-set requeue marker,
+        and delegates to the backend-specific ``_requeue``. Intended to be
+        invoked by the worker after a handler calls :meth:`Job.requeue` and
+        returns cleanly.
+        """
+        job.status = Status.QUEUED
+        job.error = None
+        job.result = None
+        job.completed = 0
+        job.started = 0
+        job.progress = 0
+        job.attempts = 0
+        job.touched = now()
+        job.meta.pop(_REQUEUE_MARKER, None)
+
+        await self._requeue(job)
+        self.requeued += 1
+        logger.info("Requeueing %s", job.info(logger.isEnabledFor(logging.DEBUG)))
 
     async def finish(
         self,

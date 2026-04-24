@@ -5,7 +5,7 @@ import typing as t
 import unittest
 from unittest import mock
 
-from saq.job import Job, Status
+from saq.job import _REQUEUE_MARKER, Job, Status
 from tests.helpers import (
     cleanup_queue,
     create_postgres_queue,
@@ -84,6 +84,21 @@ class TestJob(unittest.IsolatedAsyncioTestCase):
     async def test_retry(self) -> None:
         await self.job.retry("error")
         self.assertEqual(self.job.error, "error")
+
+    async def test_requeue_marker_set(self) -> None:
+        job = Job("func")
+        await job.requeue()
+        self.assertIs(job.meta[_REQUEUE_MARKER], True)
+
+    async def test_requeue_overrides_merge(self) -> None:
+        job = Job("func", kwargs={"a": 1})
+        await job.requeue(b=2, scheduled=123)
+        self.assertEqual(job.kwargs, {"a": 1, "b": 2})
+        self.assertEqual(job.scheduled, 123)
+        self.assertIs(job.meta[_REQUEUE_MARKER], True)
+
+        await job.requeue(kwargs={"c": 3})
+        self.assertEqual(job.kwargs, {"c": 3})
 
     async def test_stuck(self) -> None:
         self.assertFalse(Job("", status=Status.ACTIVE, timeout=0, started=0).stuck)

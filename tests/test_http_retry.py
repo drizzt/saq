@@ -1,8 +1,10 @@
+import json
 import unittest
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from aiohttp import ClientResponseError, ClientError, ServerTimeoutError
 
-from saq.queue.http import HttpQueue
+from saq.job import Job
+from saq.queue.http import HttpProxy, HttpQueue
 
 
 class TestHttpRetry(unittest.IsolatedAsyncioTestCase):
@@ -234,6 +236,31 @@ class TestHttpRetry(unittest.IsolatedAsyncioTestCase):
 
         # Test other exceptions (not retryable)
         self.assertFalse(self.queue._should_retry_on_exception(ValueError("invalid value")))
+
+    async def test_requeue_is_sent_over_http(self) -> None:
+        """Client _requeue posts a kind=requeue frame with serialized job."""
+        success_response = self.create_response_mock("")
+        self.queue.session.post.return_value = success_response
+
+        job = Job("func", kwargs={"cursor": 1})
+        with patch.object(self.queue, "serialize", return_value="SERIALIZED"):
+            await self.queue._requeue(job)
+
+        payload = self.queue.session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["kind"], "requeue")
+        self.assertEqual(payload["job"], "SERIALIZED")
+
+    async def test_proxy_dispatches_requeue_kind(self) -> None:
+        """HttpProxy.process routes kind=requeue to Queue.requeue(job)."""
+        backing_queue = MagicMock()
+        backing_queue.deserialize = MagicMock(return_value="JOB")
+        backing_queue.requeue = AsyncMock(return_value=None)
+        proxy = HttpProxy(queue=backing_queue)
+
+        result = await proxy.process(json.dumps({"kind": "requeue", "job": "PAYLOAD"}))
+        self.assertIsNone(result)
+        backing_queue.deserialize.assert_called_once_with("PAYLOAD")
+        backing_queue.requeue.assert_awaited_once_with("JOB")
 
     async def test_retry_on_different_operations(self) -> None:
         """Test retry behavior on different HTTP operations."""

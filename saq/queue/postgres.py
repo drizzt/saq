@@ -822,6 +822,10 @@ class PostgresQueue(Queue):
 
         await self.update(job, status=Status.QUEUED, scheduled=int(scheduled), expire_at=None)
 
+    async def _requeue(self, job: Job) -> None:
+        scheduled = int(job.scheduled or now_seconds())
+        await self.update(job, status=Status.QUEUED, scheduled=scheduled, expire_at=None)
+
     async def _finish(
         self,
         job: Job,

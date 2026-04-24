@@ -17,6 +17,7 @@ if t.TYPE_CHECKING:
     from saq.types import DurationKind, Function
 
 ABORT_ID_PREFIX = "saq:abort:"
+_REQUEUE_MARKER = "_saq_requeue"
 
 
 def get_default_job_key() -> str:
@@ -296,6 +297,32 @@ class Job:
     async def retry(self, error: str | None) -> None:
         """Retries the job by removing it from active and enqueueing it again."""
         await self.get_queue().retry(self, error)
+
+    async def requeue(self, **overrides: t.Any) -> None:
+        """Mark this job for re-queueing under the same key after the handler returns.
+
+        Call this from within a running job handler to continue a multi-chunk
+        workload without changing the job's key. The continuation runs as a
+        fresh attempt (``attempts`` is reset to 0) with the same function and,
+        unless overridden, the same kwargs.
+
+        Recognised dataclass fields in ``overrides`` (``kwargs``, ``scheduled``,
+        ``timeout``, ``heartbeat``, ``priority``, ``meta`` ...) are set on the
+        job; unknown names are merged into ``kwargs``.
+
+        The re-queue is committed by the worker after the handler returns
+        cleanly. If the handler raises, is aborted, or times out, the requeue
+        request is discarded and the normal retry / fail / abort path runs.
+        """
+        extra_kwargs: dict[str, t.Any] = {}
+        for k, v in overrides.items():
+            if k in self.__dataclass_fields__:
+                setattr(self, k, v)
+            else:
+                extra_kwargs[k] = v
+        if extra_kwargs:
+            self.kwargs = {**(self.kwargs or {}), **extra_kwargs}
+        self.meta[_REQUEUE_MARKER] = True
 
     async def update(self, **kwargs: t.Any) -> None:
         """

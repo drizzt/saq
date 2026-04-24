@@ -86,6 +86,8 @@ class WorkerStats(TypedDict):
     "Number of retries"
     aborted: int
     "Number of aborted tasks"
+    requeued: int
+    "Number of handler-initiated re-queues"
     uptime: int
     "Queue uptime in milliseconds"
 

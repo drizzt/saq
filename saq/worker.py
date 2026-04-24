@@ -19,7 +19,7 @@ from datetime import datetime, timezone, tzinfo
 
 from croniter import croniter
 
-from saq.job import Status
+from saq.job import _REQUEUE_MARKER, Status
 from saq.queue import Queue
 from saq.types import (
     CtxType,
@@ -374,7 +374,10 @@ class Worker(t.Generic[CtxType]):
                 task.cancel()
                 raise
             if task_ctx["aborted"] is None:
-                await job.finish(Status.COMPLETE, result=result)
+                if job.meta.pop(_REQUEUE_MARKER, None):
+                    await job.get_queue().requeue(job)
+                else:
+                    await job.finish(Status.COMPLETE, result=result)
         except asyncio.CancelledError:
             if not job or task_ctx is None:
                 return False

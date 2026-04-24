@@ -69,12 +69,37 @@ async def recurse(ctx: Context, *, n: int) -> list[str]:
     return result
 
 
+_REQUEUE_STATE: dict[str, int] = {}
+
+
+async def requeuer(ctx: Context, *, cursor: int = 0) -> int:
+    _REQUEUE_STATE["cursor"] = cursor
+    _REQUEUE_STATE["calls"] = _REQUEUE_STATE.get("calls", 0) + 1
+    if cursor < 2:
+        await ctx["job"].requeue(cursor=cursor + 1)
+    return cursor
+
+
+async def requeue_then_raise(ctx: Context) -> t.NoReturn:
+    await ctx["job"].requeue(cursor=99)
+    raise ValueError("requeue-then-raise")
+
+
+async def requeue_then_sleep(ctx: Context, *, sleep: float = 1.0) -> int:
+    await ctx["job"].requeue(cursor=99)
+    await asyncio.sleep(sleep)
+    return 1
+
+
 FUNCTIONS: list[Function[Context]] = [
     noop,
     sleeper,
     error,
     sync_echo_ctx,
     recurse,
+    requeuer,
+    requeue_then_raise,
+    requeue_then_sleep,
 ]
 
 
@@ -186,6 +211,51 @@ class TestWorker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.attempts, 2)
         self.assertEqual(job.status, Status.FAILED)
         assert job.error is not None and 'ValueError("oops")' in job.error
+
+    async def test_worker_honours_requeue_marker(self) -> None:
+        _REQUEUE_STATE.clear()
+        job = await self.enqueue("requeuer", cursor=0)
+        self.assertEqual(self.queue.requeued, 0)
+
+        await self.worker.process()
+        self.assertEqual(self.queue.requeued, 1)
+        self.assertEqual(self.queue.complete, 0)
+        await job.refresh()
+        self.assertEqual(job.status, Status.QUEUED)
+        self.assertEqual(job.attempts, 0)
+        self.assertEqual(job.kwargs, {"cursor": 1})
+
+        await self.worker.process()
+        self.assertEqual(self.queue.requeued, 2)
+        self.assertEqual(self.queue.complete, 0)
+        await job.refresh()
+        self.assertEqual(job.kwargs, {"cursor": 2})
+
+        await self.worker.process()
+        self.assertEqual(self.queue.requeued, 2)
+        self.assertEqual(self.queue.complete, 1)
+        await job.refresh()
+        self.assertEqual(job.status, Status.COMPLETE)
+        self.assertEqual(job.result, 2)
+        self.assertEqual(_REQUEUE_STATE["calls"], 3)
+
+    @mock.patch("saq.worker.logger")
+    async def test_worker_ignores_marker_on_exception(self, _mock_logger: MagicMock) -> None:
+        job = await self.enqueue("requeue_then_raise", retries=1)
+        await self.worker.process()
+        self.assertEqual(self.queue.requeued, 0)
+        await job.refresh()
+        self.assertEqual(job.status, Status.FAILED)
+        assert job.error is not None and "requeue-then-raise" in job.error
+
+    @mock.patch("saq.worker.logger")
+    async def test_worker_ignores_marker_on_timeout(self, _mock_logger: MagicMock) -> None:
+        job = await self.enqueue("requeue_then_sleep", timeout=0.05, retries=1, sleep=1.0)
+        await self.worker.process()
+        self.assertEqual(self.queue.requeued, 0)
+        await job.refresh()
+        self.assertEqual(job.status, Status.FAILED)
+        assert job.error is not None and "TimeoutError" in job.error
 
     def test_stop(self) -> None:
         loop = asyncio.new_event_loop()

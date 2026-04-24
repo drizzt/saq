@@ -420,6 +420,18 @@ class RedisQueue(Queue):
             await pipe.set(job_id, self.serialize(job)).execute()
             await self.notify(job)
 
+    async def _requeue(self, job: Job) -> None:
+        job_id = job.id
+        scheduled = job.scheduled or 0
+        async with self.redis.pipeline(transaction=True) as pipe:
+            pipe = pipe.lrem(self._active, 1, job_id)
+            pipe = pipe.set(job_id, self.serialize(job))
+            pipe = pipe.zadd(self._incomplete, {job_id: scheduled})
+            if not scheduled:
+                pipe = pipe.rpush(self._queued, job_id)
+            await pipe.execute()
+        await self.notify(job)
+
     async def _finish(
         self,
         job: Job,

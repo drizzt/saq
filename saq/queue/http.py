@@ -62,6 +62,9 @@ class HttpProxy:
             if kind == "retry":
                 await self.queue.retry(job, **req)
                 return None
+            if kind == "requeue":
+                await self.queue.requeue(job, **req)
+                return None
             if kind == "abort":
                 await self.queue.abort(job, **req)
                 return None
@@ -209,6 +212,9 @@ class HttpQueue(Queue):
 
     async def _retry(self, job: Job, error: str | None) -> None:
         await self._send("retry", job=self.serialize(job), error=error)
+
+    async def _requeue(self, job: Job) -> None:
+        await self._send("requeue", job=self.serialize(job))
 
     async def notify(self, job: Job) -> None:
         await self._send("notify", job=self.serialize(job))
